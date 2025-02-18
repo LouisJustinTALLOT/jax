@@ -33,6 +33,8 @@ limitations under the License.
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
 #include "nanobind/nanobind.h"
+#include "nanobind/ndarray.h"
+#include "jaxlib/xla/ffi.h"
 #include "xla/ffi/api/ffi.h"
 #include "xla/ffi/ffi_api.h"
 #include "xla/pjrt/host_callback.h"
@@ -207,4 +209,19 @@ XLA_FFI_REGISTER_HANDLER(ffi::GetXlaFfiApi(), "xla_ffi_python_cpu_callback",
                          "HOST",
                          {kCpuTransposePlanCacheInstantiate, nullptr, nullptr,
                           kXlaFfiPythonCpuCallback});
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(kXlaBufferPythonCpuCallback,
+                              (jax::XlaBufferCallback<nb::device::cpu::value>),
+                              ffi::Ffi::Bind()
+                                  .Ctx<ffi::DeviceOrdinal>()
+                                  .Ctx<ffi::FfiApi>()
+                                  .Ctx<ffi::FfiExecutionContext>()
+                                  .Ctx<ffi::UserData<FfiLoadedHostCallbacks>>()
+                                  .Attr<uint64_t>("index")
+                                  .RemainingArgs()
+                                  .RemainingRets());
+
+XLA_FFI_REGISTER_HANDLER(ffi::GetXlaFfiApi(), "xla_buffer_python_cpu_callback",
+                         "HOST", kXlaBufferPythonCpuCallback);
+
 }  // namespace xla

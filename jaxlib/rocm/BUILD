@@ -574,6 +574,7 @@ cc_library(
     features = ["-use_header_modules"],
     deps = [
         ":hip_vendor",
+        "//jaxlib/xla:ffi",
         "@com_google_absl//absl/algorithm:container",
         "@com_google_absl//absl/base",
         "@com_google_absl//absl/container:inlined_vector",
