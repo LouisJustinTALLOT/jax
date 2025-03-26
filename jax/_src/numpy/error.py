@@ -17,6 +17,7 @@ from typing import Literal
 
 import jax
 from jax._src import config
+import numpy as np
 
 Category = Literal["nan", "divide", "oob"]
 
@@ -100,6 +101,70 @@ def _set_error_if_divide_by_zero(pred: jax.Array, /):
   import jax.numpy as jnp
   zero = jnp.zeros_like(pred, shape=())
   error_check_lib.set_error_if(pred == zero, "Division by zero encountered")
+
+
+def _check_oob_error_slice(shape, start_indices, limit_indices):
+  if config.error_checking_behavior_oob.value == "ignore":
+    return
+
+  # TODO(mattjj): fix the circular import issue.
+  from jax._src import error_check as error_check_lib
+
+  shape = np.array(shape, dtype=np.int32)
+  start_indices = np.array(start_indices, dtype=np.int32)
+  limit_indices = np.array(limit_indices, dtype=np.int32)
+
+  err = np.logical_or(
+      np.minimum(start_indices, limit_indices) < 0,
+      np.maximum(start_indices, limit_indices) >= shape,
+  )
+  if err:
+    raise error_check_lib.JaxValueError("Out of bounds")  # we can raise eagerly
+
+
+def _check_oob_error_dynamic_slice(
+    shape, start_indices, slice_sizes, allow_negative_indices
+):
+  if config.error_checking_behavior_oob.value == "ignore":
+    return
+
+  # TODO(mattjj): fix the circular import issue.
+  from jax._src import error_check as error_check_lib
+  import jax.numpy as jnp
+
+  shape = jnp.array(shape, dtype=jnp.int32)
+  start_indices = jnp.array(start_indices, dtype=jnp.int32)
+  slice_sizes = jnp.array(slice_sizes, dtype=jnp.int32)
+  allow_negative_indices = jnp.array(allow_negative_indices, dtype=jnp.bool_)
+
+  lower_bound = jnp.select(allow_negative_indices, -shape, 0)
+
+  error_check_lib.set_error_if(
+      jnp.logical_or(
+          jnp.minimum(start_indices, start_indices + slice_sizes) < lower_bound,
+          jnp.maximum(start_indices, start_indices + slice_sizes) >= shape,
+      ),
+      "Out of bounds",
+  )
+
+
+def _check_oob_error_take(shape, gather_indices):
+  if config.error_checking_behavior_oob.value == "ignore":
+    return
+
+  # TODO(mattjj): fix the circular import issue.
+  from jax._src import error_check as error_check_lib
+  import jax.numpy as jnp
+
+  shape = jnp.array(shape, dtype=jnp.int32)
+
+  error_check_lib.set_error_if(
+      jnp.logical_or(
+          jnp.min(gather_indices) < -shape,
+          jnp.max(gather_indices) >= shape,
+      ),
+      "Out of bounds",
+  )
 
 
 Behavior = Literal["ignore", "raise"]
