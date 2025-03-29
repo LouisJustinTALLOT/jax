@@ -36,6 +36,7 @@ from jax._src.state import discharge as state_discharge
 from jax._src.state import indexing
 from jax._src.state import types as state_types
 import jax.experimental.mosaic.gpu as mgpu
+from jax.experimental.mosaic.gpu import utils as mgpu_utils
 import jax.numpy as jnp
 from jaxlib.mlir import ir
 
@@ -263,6 +264,27 @@ class UntileRef(state_types.Transform):
   def transform_dtype(self, dtype):
     return dtype
 
+  def untransform_transpose(
+      self, perm: tuple[int, ...]
+  ) -> tuple[tuple[int, ...], state_types.Transform]:
+    # The transpose in question is applied to the utiled ref so we
+    # need to translate it by duplicating and offseting the last part.
+    off = len(perm)
+    new_suffix = [i + off for i in perm[-len(self.tiling) :]]
+    if set(new_suffix) != set(range(off, off + len(self.tiling))):
+      raise ValueError(
+          "Transforms on untiled refs should not move dimensions out of"
+          f" the tiling region {new_suffix, perm, self.tiling=}"
+      )
+
+    return (*perm, *new_suffix), self
+
+  def untransform_reshape(
+      self, dtype: jnp.dtype, shape: tuple[int, ...]
+  ) -> tuple[tuple[int, ...], state_types.Transform]:
+    del dtype
+    return mgpu.tile_shape(shape, self.tiling), self
+
   def untransform_index(
       self, idxs: tuple[Index, ...]
   ) -> tuple[tuple[Index, ...], state_types.Transform]:
@@ -352,6 +374,17 @@ class TransposeRef(state_types.Transform):
   def transform_dtype(self, dtype):
     return dtype
 
+  def untransform_transpose(
+      self, perm
+  ) -> tuple[tuple[int, ...], state_types.Transform]:
+    return tuple(perm[i] for i in self.permutation)
+
+  def untransform_reshape(
+      self, dtype: jnp.dtype | ir.Type, shape: tuple[int, ...]
+  ) -> tuple[tuple[int, ...], state_types.Transform]:
+    del shape, dtype
+    raise ValueError("Can't reshape a transposed memref.")
+
   def untransform_index(
       self, idxs: tuple[Index, ...]
   ) -> tuple[tuple[Index, ...], state_types.Transform]:
@@ -423,6 +456,24 @@ class SwizzleTransform(MemoryRefTransform):
 @dataclasses.dataclass(frozen=True)
 class UnswizzleRef(state_types.Transform):
   swizzle: int = dataclasses.field(metadata=dict(static=True))
+
+  def swizzle_elems(self, dtype: jnp.dtype | ir.Type) -> int:
+    if not isinstance(dtype, ir.Type):
+      dtype = mgpu_utils.dtype_to_ir_type(dtype)
+    return (self.swizzle * 8) // mgpu.bitwidth(dtype)
+
+  def untransform_transpose(self, perm) -> tuple[tuple[int, ...], state_types.Transform]:
+    return perm, self
+
+  def untransform_reshape(
+      self, dtype: jnp.dtype | ir.Type, shape: tuple[int, ...]
+  ) -> tuple[tuple[int, ...], state_types.Transform]:
+    if self.swizzle_elems and shape[-1] % self.swizzle_elems(dtype):
+      raise ValueError(
+          f"Reshape shape {shape} is not divisible by swizzle elements"
+          f" {self.swizzle_elems(dtype)}"
+      )
+    return shape, self
 
   def untransform_index(
       self, idxs: tuple[Index, ...]
