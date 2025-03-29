@@ -1135,6 +1135,39 @@ class PallasCallDMATest(PallasBaseTest):
     np.testing.assert_array_equal(y, x)
     np.testing.assert_array_equal(sem_val, 0)
 
+  def test_set_dma_priority(self):
+    if not jtu.if_cloud_tpu_at_least(2025, 4, 2):
+      self.skipTest('Needs a newer libTPU')
+    if jtu.get_tpu_version() == 4:
+      self.skipTest('Target does not support DMA prefetch between HBM and VMEM')
+    def kernel(x1, x2, y1, y2, scratch1, scratch2, sem1, sem2):
+      copy1 = pltpu.async_copy(x1, scratch1, sem1, priority=1)
+      copy2 = pltpu.async_copy(x2, scratch2, sem2, priority=0)
+      copy1.wait()
+      copy2.wait()
+      copy1 = pltpu.async_copy(scratch1, y1, sem1, priority=0)
+      copy2 = pltpu.async_copy(scratch2, y2, sem2, priority=1)
+      copy1.wait()
+      copy2.wait()
+
+    shape = (8, 128)
+    dtype = jnp.int32
+    x1 = jnp.arange(np.prod(shape), dtype=dtype).reshape(shape)
+    x2 = x1 + 1
+    y1, y2 = self.pallas_call(
+        kernel,
+        grid_spec=pltpu.PrefetchScalarGridSpec(
+            num_scalar_prefetch=0,
+            in_specs=[pl.BlockSpec(memory_space=pl.ANY)] * 2,
+            scratch_shapes=[pltpu.VMEM(shape, dtype)] * 2
+            + [pltpu.SemaphoreType.DMA] * 2,
+            out_specs=[pl.BlockSpec(memory_space=pl.ANY)] * 2,
+        ),
+        out_shape=[jax.ShapeDtypeStruct(shape, dtype)] * 2,
+    )(x1, x2)
+    np.testing.assert_array_equal(y1, x1)
+    np.testing.assert_array_equal(y2, x2)
+
   def test_hbm_hbm_dma(self):
     def kernel(x_hbm_ref, y_hbm_ref):
       def body(sem):
