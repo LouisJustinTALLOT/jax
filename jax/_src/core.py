@@ -2594,7 +2594,7 @@ def _map_shaped_array(
   if axis is None: return aval
   sharding = aval.sharding.with_spec(tuple_delete(aval.sharding.spec, axis))
   return ShapedArray(tuple_delete(aval.shape, axis), aval.dtype,
-                     weak_type=aval.weak_type, sharding=sharding)
+                     weak_type=aval.weak_type, sharding=sharding, vma=aval.vma)
 
 def _unmap_shaped_array(
     size: int, axis: int | None, explicit_mesh_axis, aval: ShapedArray
@@ -2604,7 +2604,8 @@ def _unmap_shaped_array(
     sharding = aval.sharding.with_spec(tuple_insert(
         aval.sharding.spec, axis, explicit_mesh_axis))
     return ShapedArray(tuple_insert(aval.shape, axis, size), aval.dtype,
-                       weak_type=aval.weak_type, sharding=sharding)
+                       weak_type=aval.weak_type, sharding=sharding,
+                       vma=aval.vma)
   else: raise TypeError(axis)
 
 def _map_dshaped_array(
