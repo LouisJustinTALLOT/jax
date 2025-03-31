@@ -106,7 +106,7 @@ def _load_p_lowering_rule(
         val = memref_dialect.load(x_ref, [])
         return mgpu.FragmentedArray.splat(val, shape=(), layout=layout, is_signed=is_signed)
       match layout:
-        case mgpu.WGMMARowFragLayout():
+        case mgpu.WGMMA_ROW_LAYOUT:
           return mgpu.FragmentedArray.load_wgmma_row(
               x_ref, is_signed=mgpu_utils.is_signed(x_aval.dtype)
           )
