@@ -106,13 +106,13 @@ def _load_p_lowering_rule(
         val = memref_dialect.load(x_ref, [])
         return mgpu.FragmentedArray.splat(val, shape=(), layout=layout, is_signed=is_signed)
       match layout:
-        case mgpu.WGMMARowFragLayout():
-          return mgpu.FragmentedArray.load_wgmma_row(
-              x_ref, is_signed=mgpu_utils.is_signed(x_aval.dtype)
+        case mgpu.WGMMA_ROW_LAYOUT:
+          return mgpu.FragmentedArray.load_untiled(
+              x_ref, layout=layout, is_signed=mgpu_utils.is_signed(x_aval.dtype)
           )
-        case mgpu.WGMMAColFragLayout():
-          return mgpu.FragmentedArray.load_wgmma_col(
-              x_ref, is_signed=mgpu_utils.is_signed(x_aval.dtype)
+        case mgpu.WGMMA_COL_LAYOUT:
+          return mgpu.FragmentedArray.load_untiled(
+              x_ref, layout=layout, is_signed=mgpu_utils.is_signed(x_aval.dtype)
           )
         case mgpu.WGStridedFragLayout(shape=shape, vec_size=vec_size):
           ref_ty = ir.MemRefType(x_ref.type)
@@ -120,7 +120,6 @@ def _load_p_lowering_rule(
             raise ValueError(
                 f"Unsupported shape {shape}, (expected {tuple(ref_ty.shape)})"
             )
-
           return mgpu.FragmentedArray.load_strided(
               x_ref, is_signed=mgpu_utils.is_signed(x_aval.dtype), vec_size=vec_size,
           )

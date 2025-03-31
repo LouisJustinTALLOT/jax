@@ -489,19 +489,12 @@ def get_packed_shape(strides, shape):
 
 class WGMMALayoutTest(TestCase):
 
-  @parameterized.product(dtype=[jnp.float16, jnp.float32],
-                         transposed_smem=[False, True])
-  def test_store_untiled(self, dtype, transposed_smem):
+  @parameterized.product(dtype=[jnp.float16, jnp.float32])
+  def test_store_untiled(self, dtype):
     def kernel(ctx, out, _):
       del ctx
-      if transposed_smem:
-        out = memref_transpose(out, (1, 0))
-      iota_tensor(64, 64, dtype).store_untiled(
-          out, vector_store=not transposed_smem
-      )
+      iota_tensor(64, 64, dtype).store_untiled(out)
     expected = np.arange(64 * 64, dtype=dtype).reshape(64, 64)
-    if transposed_smem:
-      expected = expected.T
     iota = mgpu.as_gpu_kernel(
         kernel, (1, 1, 1), (128, 1, 1), (), expected, ()
     )()
@@ -1759,9 +1752,8 @@ class FragmentedArrayTest(TestCase):
   def test_foreach(self):
     dtype = jnp.int32
     swizzle = 128
-    tile = 64, swizzle // jnp.dtype(dtype).itemsize
+    tiling = (8, swizzle // jnp.dtype(dtype).itemsize)
     shape = 128, 192
-    tiled_shape = mgpu.tile_shape(shape, tile)
     mlir_dtype = utils.dtype_to_ir_type(dtype)
     cst = 9999
     def causal(val, idx):
@@ -1769,12 +1761,16 @@ class FragmentedArrayTest(TestCase):
       mask = arith.cmpi(arith.CmpIPredicate.uge, row, col)
       return arith.select(mask, val, c(cst, mlir_dtype))
 
-    tiling = mgpu.TileTransform(tile)
     def kernel(ctx, dst, smem):
       x = iota_tensor(shape[0], shape[1], dtype)
-      x.foreach(causal, create_array=True, is_signed=False).store_untiled(smem)
+      x.foreach(causal, create_array=True, is_signed=False).store_tiled(smem, swizzle=128)
       mgpu.commit_shared()
-      ctx.async_copy(src_ref=smem, dst_ref=dst)
+      ctx.async_copy(
+          src_ref=smem,
+          dst_ref=dst,
+          gmem_transform=mgpu.TileTransform(tiling),
+          swizzle=128,
+      )
       ctx.await_async_copy(0)
 
     iota = np.arange(np.prod(shape), dtype=dtype).reshape(*shape)
@@ -1784,7 +1780,7 @@ class FragmentedArrayTest(TestCase):
         (128, 1, 1),
         (),
         jax.ShapeDtypeStruct(shape=shape, dtype=dtype),
-        jax.ShapeDtypeStruct(shape=shape, dtype=dtype),
+        jax.ShapeDtypeStruct(shape=mgpu.tile_shape(shape, tiling), dtype=dtype),
     )()
     expected = jnp.tril(iota) + jnp.triu(jnp.ones(shape), k=1) * cst
     np.testing.assert_array_equal(result, expected)
@@ -2004,29 +2000,39 @@ class FragmentedArrayTest(TestCase):
     )(inp)
     np.testing.assert_array_equal(inp, result)
 
-  @parameterized.product(in_shape=((128,), (64,)))
-  def test_wgmma_row_load_store_with_layout(self, in_shape):
-    def kernel(ctx, *args):
-      gmem_input, gmem_output, (smem_input, smem_output) = args
-      copy(gmem_input, smem_input)
-      t = mgpu.FragmentedArray.load_wgmma_row(smem_input)
+  @parameterized.product(
+      in_shape=((1024,), (256,), (128,), (64,)),
+      dtype=(jnp.float16, jnp.float32),
+      swizzle=(16, 32, 64, 128)
+  )
+  def test_wgmma_row_load_store_with_layout(self, in_shape, dtype, swizzle):
+    def kernel(ctx, gmem_input, gmem_output, smem):
+      smem_input, smem_output = smem
+      copy(gmem_input, smem_input, swizzle=swizzle)
+      t = mgpu.FragmentedArray.load_untiled(
+          smem_input, layout=mgpu.WGMMA_ROW_LAYOUT, swizzle=swizzle
+      )
       t.store_untiled(smem_output)
       copy(smem_output, gmem_output)
 
-    inp = out = self.prng.uniform(-1, 1, in_shape).astype(jnp.float32)
+    inp = out = self.prng.uniform(-1, 1, in_shape).astype(dtype)
     result = mgpu.as_gpu_kernel(
         kernel, (1, 1, 1), (128, 1, 1), (inp,), out, [inp, out],
     )(inp)
     np.testing.assert_array_equal(inp, result)
 
   @parameterized.product(
-      in_shape=((128,), (64,)), dtype=[jnp.float16, jnp.float32]
+      in_shape=((128,), (64,)),
+      dtype=(jnp.float16, jnp.float32),
+      swizzle=(16, 32, 64, 128),
   )
-  def test_wgmma_col_load_store_with_layout(self, in_shape, dtype):
+  def test_wgmma_col_load_store_with_layout(self, in_shape, dtype, swizzle):
     def kernel(ctx, *args):
       gmem_input, gmem_output, (smem_input, smem_output) = args
-      copy(gmem_input, smem_input)
-      t = mgpu.FragmentedArray.load_wgmma_col(smem_input)
+      copy(gmem_input, smem_input, swizzle=swizzle)
+      t = mgpu.FragmentedArray.load_untiled(
+          smem_input, swizzle=swizzle, layout=mgpu.WGMMA_COL_LAYOUT
+      )
       t.store_untiled(smem_output)
       copy(smem_output, gmem_output)
 
@@ -2038,18 +2044,17 @@ class FragmentedArrayTest(TestCase):
 
   @parameterized.parameters((128, 128), (128, 64), (64, 128))
   def test_broadcast_major(self, m, n):
-    def kernel(ctx, *args):
-      gmem_input, gmem_output, () = args
-      t = mgpu.FragmentedArray.load_wgmma_col(gmem_input)
+    def kernel(ctx, gmem_input, gmem_output, _):
+      t = mgpu.FragmentedArray.load_untiled(
+          gmem_input, layout=mgpu.WGMMA_COL_LAYOUT
+      )
       t.broadcast_major(m).store_untiled(gmem_output)
 
     inp = self.prng.uniform(-1, 1, (n,)).astype(jnp.float16)
     out_shape = jax.ShapeDtypeStruct((m, n), jnp.float16)
-
     result = mgpu.as_gpu_kernel(
-        kernel, (1, 1, 1), (128, 1, 1), (inp,), out_shape, ()
+        kernel, (1, 1, 1), (128, 1, 1), (inp,), out_shape, inp
     )(inp)
-
     out_ref = jax.lax.broadcast_in_dim(inp, (m, n), (1,))
     np.testing.assert_array_equal(result, out_ref)
 
